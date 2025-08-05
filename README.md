@@ -124,9 +124,7 @@ The frontend will typically run on [http://localhost:5173](http://localhost:5173
 ---
 
 ## Future Enhancements
-- Support for more coding platforms (e.g., HackerRank, Codeforces)
 - Social sharing of solutions and comments
-- Leaderboards and gamification
 - In-app code execution and testing
 - Enhanced AI models for deeper code analysis
 
