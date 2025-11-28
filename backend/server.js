@@ -7,9 +7,6 @@ const dotenv = require('dotenv');
 // Load environment variables
 dotenv.config();
 
-// Import database connection
-const connectDB = require('./config/db');
-
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const solutionRoutes = require('./routes/solutionRoutes');
@@ -17,9 +14,6 @@ const commentRoutes = require('./routes/commentRoutes');
 
 // Initialize express app
 const app = express();
-
-// Connect to MongoDB
-connectDB();
 
 // Security middleware
 app.use(helmet());
@@ -125,14 +119,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Handle MongoDB duplicate key error
-  if (err.code === 11000) {
-    const field = Object.keys(err.keyValue)[0];
-    return res.status(400).json({
-      success: false,
-      message: `${field} already exists`
-    });
-  }
 
   // Handle JWT errors
   if (err.name === 'JsonWebTokenError') {

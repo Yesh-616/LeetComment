@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+
+// Mock user data (in-memory storage for API-only mode)
+const mockUsers = {};
 
 // Protect routes - require authentication
 const protect = async (req, res, next) => {
@@ -14,8 +16,8 @@ const protect = async (req, res, next) => {
       // Verify token
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // Get user from token
-      req.user = await User.findById(decoded.id).select('-password');
+      // Get user from mock storage
+      req.user = mockUsers[decoded.id] || null;
 
       if (!req.user) {
         return res.status(401).json({ 
@@ -57,7 +59,7 @@ const optionalAuth = async (req, res, next) => {
     try {
       token = req.headers.authorization.split(' ')[1];
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.id).select('-password');
+      req.user = mockUsers[decoded.id] || null;
     } catch (error) {
       // Token is invalid, but we don't block the request
       req.user = null;
@@ -74,41 +76,9 @@ const generateToken = (id) => {
   });
 };
 
-// Check if user owns the resource
-const checkOwnership = (model) => {
-  return async (req, res, next) => {
-    try {
-      const resource = await model.findById(req.params.id);
-      
-      if (!resource) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Resource not found' 
-        });
-      }
-
-      // Check if user owns the resource or is admin
-      if (resource.user.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'Access denied. You can only modify your own resources' 
-        });
-      }
-
-      req.resource = resource;
-      next();
-    } catch (error) {
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Server error' 
-      });
-    }
-  };
-};
-
 module.exports = {
   protect,
   optionalAuth,
   generateToken,
-  checkOwnership
+  mockUsers
 }; 

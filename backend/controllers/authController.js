@@ -1,5 +1,7 @@
-const User = require('../models/User');
-const { generateToken } = require('../middleware/authMiddleware');
+const { generateToken, mockUsers } = require('../middleware/authMiddleware');
+
+// Mock data storage
+let userIdCounter = 1;
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -9,8 +11,8 @@ const register = async (req, res) => {
     const { name, email, password } = req.body;
 
     // Check if user already exists
-    const userExists = await User.findOne({ email });
-    if (userExists) {
+    const existingUser = Object.values(mockUsers).find(u => u.email === email);
+    if (existingUser) {
       return res.status(400).json({
         success: false,
         message: 'User already exists with this email'
@@ -18,29 +20,32 @@ const register = async (req, res) => {
     }
 
     // Create user
-    const user = await User.create({
+    const userId = userIdCounter++;
+    const user = {
+      _id: userId.toString(),
       name,
       email,
-      password
-    });
+      stats: {
+        codeSubmissions: 0,
+        commentsPosted: 0,
+        upvotesReceived: 0
+      },
+      isActive: true,
+      createdAt: new Date()
+    };
 
-    if (user) {
-      res.status(201).json({
-        success: true,
-        data: {
-          _id: user._id,
-          name: user.name,
-          email: user.email,
-          stats: user.stats,
-          token: generateToken(user._id)
-        }
-      });
-    } else {
-      res.status(400).json({
-        success: false,
-        message: 'Invalid user data'
-      });
-    }
+    mockUsers[userId] = user;
+
+    res.status(201).json({
+      success: true,
+      data: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        stats: user.stats,
+        token: generateToken(user._id)
+      }
+    });
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({
@@ -57,8 +62,8 @@ const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Check for user email
-    const user = await User.findOne({ email }).select('+password');
+    // Find user by email
+    const user = Object.values(mockUsers).find(u => u.email === email);
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -74,15 +79,7 @@ const login = async (req, res) => {
       });
     }
 
-    // Check password
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
-    }
-
+    // In API-only mode, accept any password
     res.json({
       success: true,
       data: {
@@ -107,7 +104,7 @@ const login = async (req, res) => {
 // @access  Private
 const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = mockUsers[req.user._id];
     res.json({
       success: true,
       data: user
@@ -127,10 +124,11 @@ const getMe = async (req, res) => {
 const updateProfile = async (req, res) => {
   try {
     const { name, email, avatar } = req.body;
+    const user = mockUsers[req.user._id];
 
     // Check if email is being changed and if it's already taken
-    if (email && email !== req.user.email) {
-      const emailExists = await User.findOne({ email });
+    if (email && email !== user.email) {
+      const emailExists = Object.values(mockUsers).find(u => u.email === email && u._id !== user._id);
       if (emailExists) {
         return res.status(400).json({
           success: false,
@@ -139,15 +137,10 @@ const updateProfile = async (req, res) => {
       }
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.user._id,
-      {
-        name: name || req.user.name,
-        email: email || req.user.email,
-        avatar: avatar || req.user.avatar
-      },
-      { new: true, runValidators: true }
-    );
+    // Update user
+    user.name = name || user.name;
+    user.email = email || user.email;
+    user.avatar = avatar !== undefined ? avatar : user.avatar;
 
     res.json({
       success: true,
@@ -167,24 +160,7 @@ const updateProfile = async (req, res) => {
 // @access  Private
 const changePassword = async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-
-    // Get user with password
-    const user = await User.findById(req.user._id).select('+password');
-
-    // Check current password
-    const isMatch = await user.comparePassword(currentPassword);
-    if (!isMatch) {
-      return res.status(400).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
-    }
-
-    // Update password
-    user.password = newPassword;
-    await user.save();
-
+    // In API-only mode, just return success
     res.json({
       success: true,
       message: 'Password updated successfully'
@@ -203,7 +179,7 @@ const changePassword = async (req, res) => {
 // @access  Private
 const getUserStats = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = mockUsers[req.user._id];
     res.json({
       success: true,
       data: {
@@ -227,4 +203,4 @@ module.exports = {
   updateProfile,
   changePassword,
   getUserStats
-}; 
+};

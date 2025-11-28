@@ -1,6 +1,9 @@
-const Comment = require('../models/Comment');
-const Solution = require('../models/Solution');
-const User = require('../models/User');
+const { mockUsers } = require('../middleware/authMiddleware');
+const { mockSolutions } = require('./solutionController');
+
+// Mock data storage
+let commentIdCounter = 1;
+const mockComments = {};
 
 // @desc    Create new comment
 // @route   POST /api/comments
@@ -18,7 +21,7 @@ const createComment = async (req, res) => {
     }
 
     // Check if solution exists
-    const solution = await Solution.findById(solutionId);
+    const solution = mockSolutions[solutionId];
     if (!solution) {
       return res.status(404).json({
         success: false,
@@ -28,7 +31,7 @@ const createComment = async (req, res) => {
 
     // If this is a reply, check if parent comment exists
     if (parentCommentId) {
-      const parentComment = await Comment.findById(parentCommentId);
+      const parentComment = mockComments[parentCommentId];
       if (!parentComment) {
         return res.status(404).json({
           success: false,
@@ -38,31 +41,52 @@ const createComment = async (req, res) => {
     }
 
     // Create comment
-    const comment = await Comment.create({
+    const commentId = commentIdCounter++;
+    const comment = {
+      _id: commentId.toString(),
       solution: solutionId,
       author: req.user._id,
       content,
-      parentComment: parentCommentId || null
-    });
+      parentComment: parentCommentId || null,
+      replies: [],
+      upvotes: 0,
+      downvotes: 0,
+      userVotes: [],
+      isEdited: false,
+      isDeleted: false,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    mockComments[commentId] = comment;
 
     // If this is a reply, add to parent's replies
     if (parentCommentId) {
-      await Comment.findByIdAndUpdate(parentCommentId, {
-        $push: { replies: comment._id }
-      });
+      const parentComment = mockComments[parentCommentId];
+      if (parentComment) {
+        parentComment.replies = parentComment.replies || [];
+        parentComment.replies.push(commentId.toString());
+      }
     }
 
     // Update user stats
-    await User.findByIdAndUpdate(req.user._id, {
-      $inc: { 'stats.commentsPosted': 1 }
-    });
+    if (mockUsers[req.user._id]) {
+      mockUsers[req.user._id].stats.commentsPosted = (mockUsers[req.user._id].stats.commentsPosted || 0) + 1;
+    }
 
     // Populate author info
-    await comment.populate('author', 'name email');
+    const commentWithAuthor = {
+      ...comment,
+      author: mockUsers[req.user._id] ? {
+        _id: mockUsers[req.user._id]._id,
+        name: mockUsers[req.user._id].name,
+        email: mockUsers[req.user._id].email
+      } : null
+    };
 
     res.status(201).json({
       success: true,
-      data: comment
+      data: commentWithAuthor
     });
   } catch (error) {
     console.error('Create comment error:', error);
@@ -84,7 +108,7 @@ const getCommentsBySolution = async (req, res) => {
     const skip = (page - 1) * limit;
 
     // Check if solution exists
-    const solution = await Solution.findById(solutionId);
+    const solution = mockSolutions[solutionId];
     if (!solution) {
       return res.status(404).json({
         success: false,
@@ -93,44 +117,48 @@ const getCommentsBySolution = async (req, res) => {
     }
 
     // Get top-level comments (not replies)
-    const comments = await Comment.find({
-      solution: solutionId,
-      parentComment: null,
-      isDeleted: false
-    })
-      .populate('author', 'name email')
-      .populate({
-        path: 'replies',
-        populate: {
-          path: 'author',
-          select: 'name email'
-        }
-      })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    let comments = Object.values(mockComments).filter(c => 
+      c.solution === solutionId && 
+      !c.parentComment && 
+      !c.isDeleted
+    );
 
-    // Add user vote information if authenticated
-    if (req.user) {
-      comments.forEach(comment => {
-        comment.userVote = comment.getUserVote(req.user._id);
-        if (comment.replies) {
-          comment.replies.forEach(reply => {
-            reply.userVote = reply.getUserVote(req.user._id);
-          });
-        }
-      });
-    }
+    // Sort by createdAt descending
+    comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    const total = await Comment.countDocuments({
-      solution: solutionId,
-      parentComment: null,
-      isDeleted: false
+    const total = comments.length;
+    const paginatedComments = comments.slice(skip, skip + limit);
+
+    // Populate author and replies
+    const commentsWithDetails = paginatedComments.map(comment => {
+      const replies = (comment.replies || [])
+        .map(replyId => mockComments[replyId])
+        .filter(r => r && !r.isDeleted)
+        .map(reply => ({
+          ...reply,
+          author: mockUsers[reply.author] ? {
+            _id: mockUsers[reply.author]._id,
+            name: mockUsers[reply.author].name,
+            email: mockUsers[reply.author].email
+          } : null,
+          userVote: req.user ? getUserVote(reply, req.user._id) : null
+        }));
+
+      return {
+        ...comment,
+        author: mockUsers[comment.author] ? {
+          _id: mockUsers[comment.author]._id,
+          name: mockUsers[comment.author].name,
+          email: mockUsers[comment.author].email
+        } : null,
+        replies,
+        userVote: req.user ? getUserVote(comment, req.user._id) : null
+      };
     });
 
     res.json({
       success: true,
-      data: comments,
+      data: commentsWithDetails,
       pagination: {
         page,
         limit,
@@ -147,6 +175,12 @@ const getCommentsBySolution = async (req, res) => {
   }
 };
 
+// Helper function to get user vote
+const getUserVote = (comment, userId) => {
+  const vote = comment.userVotes.find(v => v.user === userId);
+  return vote ? vote.vote : null;
+};
+
 // @desc    Update comment
 // @route   PUT /api/comments/:id
 // @access  Private
@@ -161,7 +195,7 @@ const updateComment = async (req, res) => {
       });
     }
 
-    const comment = await Comment.findById(req.params.id);
+    const comment = mockComments[req.params.id];
 
     if (!comment) {
       return res.status(404).json({
@@ -171,7 +205,7 @@ const updateComment = async (req, res) => {
     }
 
     // Check ownership
-    if (comment.author.toString() !== req.user._id.toString()) {
+    if (comment.author !== req.user._id) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this comment'
@@ -188,13 +222,21 @@ const updateComment = async (req, res) => {
 
     comment.content = content;
     comment.isEdited = true;
-    await comment.save();
+    comment.updatedAt = new Date();
 
-    await comment.populate('author', 'name email');
+    // Populate author info
+    const commentWithAuthor = {
+      ...comment,
+      author: mockUsers[comment.author] ? {
+        _id: mockUsers[comment.author]._id,
+        name: mockUsers[comment.author].name,
+        email: mockUsers[comment.author].email
+      } : null
+    };
 
     res.json({
       success: true,
-      data: comment
+      data: commentWithAuthor
     });
   } catch (error) {
     console.error('Update comment error:', error);
@@ -210,7 +252,7 @@ const updateComment = async (req, res) => {
 // @access  Private
 const deleteComment = async (req, res) => {
   try {
-    const comment = await Comment.findById(req.params.id);
+    const comment = mockComments[req.params.id];
 
     if (!comment) {
       return res.status(404).json({
@@ -220,7 +262,7 @@ const deleteComment = async (req, res) => {
     }
 
     // Check ownership
-    if (comment.author.toString() !== req.user._id.toString()) {
+    if (comment.author !== req.user._id) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to delete this comment'
@@ -229,7 +271,7 @@ const deleteComment = async (req, res) => {
 
     // Soft delete - mark as deleted instead of removing
     comment.isDeleted = true;
-    await comment.save();
+    comment.updatedAt = new Date();
 
     res.json({
       success: true,
@@ -258,7 +300,7 @@ const voteComment = async (req, res) => {
       });
     }
 
-    const comment = await Comment.findById(req.params.id);
+    const comment = mockComments[req.params.id];
 
     if (!comment) {
       return res.status(404).json({
@@ -276,20 +318,49 @@ const voteComment = async (req, res) => {
     }
 
     // Add vote
-    await comment.addVote(req.user._id, voteType);
+    const existingVoteIndex = comment.userVotes.findIndex(v => v.user === req.user._id);
 
-    // Update author's upvotes received if upvoted
-    if (voteType === 'up') {
-      await User.findByIdAndUpdate(comment.author, {
-        $inc: { 'stats.upvotesReceived': 1 }
-      });
+    if (existingVoteIndex !== -1) {
+      const existingVote = comment.userVotes[existingVoteIndex];
+      
+      // Remove existing vote
+      if (existingVote.vote === 'up') comment.upvotes--;
+      else comment.downvotes--;
+      
+      // Remove vote if same type, otherwise change vote
+      if (existingVote.vote === voteType) {
+        comment.userVotes.splice(existingVoteIndex, 1);
+      } else {
+        comment.userVotes[existingVoteIndex].vote = voteType;
+        comment.userVotes[existingVoteIndex].createdAt = new Date();
+        if (voteType === 'up') comment.upvotes++;
+        else comment.downvotes++;
+      }
+    } else {
+      // Add new vote
+      comment.userVotes.push({ user: req.user._id, vote: voteType, createdAt: new Date() });
+      if (voteType === 'up') comment.upvotes++;
+      else comment.downvotes++;
     }
 
-    await comment.populate('author', 'name email');
+    // Update author's upvotes received if upvoted
+    if (voteType === 'up' && mockUsers[comment.author]) {
+      mockUsers[comment.author].stats.upvotesReceived = (mockUsers[comment.author].stats.upvotesReceived || 0) + 1;
+    }
+
+    // Populate author info
+    const commentWithAuthor = {
+      ...comment,
+      author: mockUsers[comment.author] ? {
+        _id: mockUsers[comment.author]._id,
+        name: mockUsers[comment.author].name,
+        email: mockUsers[comment.author].email
+      } : null
+    };
 
     res.json({
       success: true,
-      data: comment
+      data: commentWithAuthor
     });
   } catch (error) {
     console.error('Vote comment error:', error);
@@ -305,15 +376,7 @@ const voteComment = async (req, res) => {
 // @access  Public
 const getComment = async (req, res) => {
   try {
-    const comment = await Comment.findById(req.params.id)
-      .populate('author', 'name email')
-      .populate({
-        path: 'replies',
-        populate: {
-          path: 'author',
-          select: 'name email'
-        }
-      });
+    const comment = mockComments[req.params.id];
 
     if (!comment) {
       return res.status(404).json({
@@ -322,19 +385,34 @@ const getComment = async (req, res) => {
       });
     }
 
-    // Add user vote information if authenticated
-    if (req.user) {
-      comment.userVote = comment.getUserVote(req.user._id);
-      if (comment.replies) {
-        comment.replies.forEach(reply => {
-          reply.userVote = reply.getUserVote(req.user._id);
-        });
-      }
-    }
+    // Populate replies
+    const replies = (comment.replies || [])
+      .map(replyId => mockComments[replyId])
+      .filter(r => r && !r.isDeleted)
+      .map(reply => ({
+        ...reply,
+        author: mockUsers[reply.author] ? {
+          _id: mockUsers[reply.author]._id,
+          name: mockUsers[reply.author].name,
+          email: mockUsers[reply.author].email
+        } : null,
+        userVote: req.user ? getUserVote(reply, req.user._id) : null
+      }));
+
+    const commentWithDetails = {
+      ...comment,
+      author: mockUsers[comment.author] ? {
+        _id: mockUsers[comment.author]._id,
+        name: mockUsers[comment.author].name,
+        email: mockUsers[comment.author].email
+      } : null,
+      replies,
+      userVote: req.user ? getUserVote(comment, req.user._id) : null
+    };
 
     res.json({
       success: true,
-      data: comment
+      data: commentWithDetails
     });
   } catch (error) {
     console.error('Get comment error:', error);
@@ -354,23 +432,29 @@ const getMyComments = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const comments = await Comment.find({
-      author: req.user._id,
-      isDeleted: false
-    })
-      .populate('solution', 'title problemId')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    let comments = Object.values(mockComments).filter(c => 
+      c.author === req.user._id && !c.isDeleted
+    );
 
-    const total = await Comment.countDocuments({
-      author: req.user._id,
-      isDeleted: false
-    });
+    // Sort by createdAt descending
+    comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const total = comments.length;
+    const paginatedComments = comments.slice(skip, skip + limit);
+
+    // Populate solution info
+    const commentsWithSolution = paginatedComments.map(comment => ({
+      ...comment,
+      solution: mockSolutions[comment.solution] ? {
+        _id: mockSolutions[comment.solution]._id,
+        title: mockSolutions[comment.solution].title,
+        problemId: mockSolutions[comment.solution].problemId
+      } : null
+    }));
 
     res.json({
       success: true,
-      data: comments,
+      data: commentsWithSolution,
       pagination: {
         page,
         limit,
@@ -394,5 +478,6 @@ module.exports = {
   deleteComment,
   voteComment,
   getComment,
-  getMyComments
-}; 
+  getMyComments,
+  mockComments
+};

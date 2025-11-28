@@ -1,6 +1,9 @@
-const Solution = require('../models/Solution');
-const User = require('../models/User');
 const aiCommentGenerator = require('../utils/aiCommentGenerator');
+const { mockUsers } = require('../middleware/authMiddleware');
+
+// Mock data storage
+let solutionIdCounter = 1;
+const mockSolutions = {};
 
 // @desc    Create new solution with AI analysis
 // @route   POST /api/solutions
@@ -21,7 +24,9 @@ const createSolution = async (req, res) => {
     const analysis = await aiCommentGenerator.analyzeCode(originalCode, language);
 
     // Create solution
-    const solution = await Solution.create({
+    const solutionId = solutionIdCounter++;
+    const solution = {
+      _id: solutionId.toString(),
       user: req.user._id,
       title,
       problemId,
@@ -38,13 +43,20 @@ const createSolution = async (req, res) => {
         optimizations: analysis.optimizations
       },
       optimizationDetails: analysis.optimizationDetails,
-      tags: tags || []
-    });
+      tags: tags || [],
+      isPublic: true,
+      views: 0,
+      likes: 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    mockSolutions[solutionId] = solution;
 
     // Update user stats
-    await User.findByIdAndUpdate(req.user._id, {
-      $inc: { 'stats.codeSubmissions': 1 }
-    });
+    if (mockUsers[req.user._id]) {
+      mockUsers[req.user._id].stats.codeSubmissions = (mockUsers[req.user._id].stats.codeSubmissions || 0) + 1;
+    }
 
     res.status(201).json({
       success: true,
@@ -70,29 +82,38 @@ const getSolutions = async (req, res) => {
 
     const { language, problemId, userId, search } = req.query;
 
-    // Build filter object
-    const filter = { isPublic: true };
-    if (language) filter.language = language;
-    if (problemId) filter.problemId = problemId;
-    if (userId) filter.user = userId;
+    // Build filter
+    let solutions = Object.values(mockSolutions).filter(s => s.isPublic);
+    if (language) solutions = solutions.filter(s => s.language === language);
+    if (problemId) solutions = solutions.filter(s => s.problemId === problemId);
+    if (userId) solutions = solutions.filter(s => s.user === userId);
     if (search) {
-      filter.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { 'analysis.approach': { $regex: search, $options: 'i' } }
-      ];
+      const searchLower = search.toLowerCase();
+      solutions = solutions.filter(s => 
+        s.title.toLowerCase().includes(searchLower) || 
+        s.analysis.approach.toLowerCase().includes(searchLower)
+      );
     }
 
-    const solutions = await Solution.find(filter)
-      .populate('user', 'name email')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    // Sort by createdAt descending
+    solutions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    const total = await Solution.countDocuments(filter);
+    const total = solutions.length;
+    const paginatedSolutions = solutions.slice(skip, skip + limit);
+
+    // Populate user info
+    const solutionsWithUser = paginatedSolutions.map(s => ({
+      ...s,
+      user: mockUsers[s.user] ? {
+        _id: mockUsers[s.user]._id,
+        name: mockUsers[s.user].name,
+        email: mockUsers[s.user].email
+      } : null
+    }));
 
     res.json({
       success: true,
-      data: solutions,
+      data: solutionsWithUser,
       pagination: {
         page,
         limit,
@@ -114,12 +135,7 @@ const getSolutions = async (req, res) => {
 // @access  Public
 const getSolution = async (req, res) => {
   try {
-    const solution = await Solution.findById(req.params.id)
-      .populate('user', 'name email stats')
-      .populate({
-        path: 'commentCount',
-        select: 'content author createdAt'
-      });
+    const solution = mockSolutions[req.params.id];
 
     if (!solution) {
       return res.status(404).json({
@@ -129,14 +145,36 @@ const getSolution = async (req, res) => {
     }
 
     // Increment views if not the owner
-    if (!req.user || solution.user._id.toString() !== req.user._id.toString()) {
-      solution.views += 1;
-      await solution.save();
+    if (!req.user || solution.user !== req.user._id) {
+      solution.views = (solution.views || 0) + 1;
     }
+
+    // Count comments (avoid circular dependency by checking if module is loaded)
+    let commentCount = 0;
+    try {
+      const commentController = require('./commentController');
+      if (commentController.mockComments) {
+        commentCount = Object.values(commentController.mockComments).filter(c => c.solution === solution._id).length;
+      }
+    } catch (e) {
+      // Module not loaded yet, commentCount will be 0
+    }
+
+    // Populate user info
+    const solutionWithUser = {
+      ...solution,
+      user: mockUsers[solution.user] ? {
+        _id: mockUsers[solution.user]._id,
+        name: mockUsers[solution.user].name,
+        email: mockUsers[solution.user].email,
+        stats: mockUsers[solution.user].stats
+      } : null,
+      commentCount
+    };
 
     res.json({
       success: true,
-      data: solution
+      data: solutionWithUser
     });
   } catch (error) {
     console.error('Get solution error:', error);
@@ -154,7 +192,7 @@ const updateSolution = async (req, res) => {
   try {
     const { title, originalCode, language, tags, isPublic } = req.body;
 
-    const solution = await Solution.findById(req.params.id);
+    const solution = mockSolutions[req.params.id];
 
     if (!solution) {
       return res.status(404).json({
@@ -164,50 +202,51 @@ const updateSolution = async (req, res) => {
     }
 
     // Check ownership
-    if (solution.user.toString() !== req.user._id.toString()) {
+    if (solution.user !== req.user._id) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this solution'
       });
     }
 
-    // If code changed, regenerate AI analysis
-    let updatedData = {
-      title: title || solution.title,
-      language: language || solution.language,
-      tags: tags || solution.tags,
-      isPublic: isPublic !== undefined ? isPublic : solution.isPublic
-    };
+    // Update fields
+    if (title) solution.title = title;
+    if (language) solution.language = language;
+    if (tags) solution.tags = tags;
+    if (isPublic !== undefined) solution.isPublic = isPublic;
+    solution.updatedAt = new Date();
 
+    // If code changed, regenerate AI analysis
     if (originalCode && originalCode !== solution.originalCode) {
       const analysis = await aiCommentGenerator.analyzeCode(originalCode, language || solution.language);
       
-      updatedData = {
-        ...updatedData,
-        originalCode,
-        commentedCode: analysis.commentedCode,
-        optimizedCode: analysis.optimizedCode,
-        analysis: {
-          algorithmType: analysis.algorithmType,
-          timeComplexity: analysis.timeComplexity,
-          spaceComplexity: analysis.spaceComplexity,
-          approach: analysis.approach,
-          keyInsights: analysis.keyInsights,
-          optimizations: analysis.optimizations
-        },
-        optimizationDetails: analysis.optimizationDetails
+      solution.originalCode = originalCode;
+      solution.commentedCode = analysis.commentedCode;
+      solution.optimizedCode = analysis.optimizedCode;
+      solution.analysis = {
+        algorithmType: analysis.algorithmType,
+        timeComplexity: analysis.timeComplexity,
+        spaceComplexity: analysis.spaceComplexity,
+        approach: analysis.approach,
+        keyInsights: analysis.keyInsights,
+        optimizations: analysis.optimizations
       };
+      solution.optimizationDetails = analysis.optimizationDetails;
     }
 
-    const updatedSolution = await Solution.findByIdAndUpdate(
-      req.params.id,
-      updatedData,
-      { new: true, runValidators: true }
-    ).populate('user', 'name email');
+    // Populate user info
+    const solutionWithUser = {
+      ...solution,
+      user: mockUsers[solution.user] ? {
+        _id: mockUsers[solution.user]._id,
+        name: mockUsers[solution.user].name,
+        email: mockUsers[solution.user].email
+      } : null
+    };
 
     res.json({
       success: true,
-      data: updatedSolution
+      data: solutionWithUser
     });
   } catch (error) {
     console.error('Update solution error:', error);
@@ -223,7 +262,7 @@ const updateSolution = async (req, res) => {
 // @access  Private
 const deleteSolution = async (req, res) => {
   try {
-    const solution = await Solution.findById(req.params.id);
+    const solution = mockSolutions[req.params.id];
 
     if (!solution) {
       return res.status(404).json({
@@ -233,14 +272,14 @@ const deleteSolution = async (req, res) => {
     }
 
     // Check ownership
-    if (solution.user.toString() !== req.user._id.toString()) {
+    if (solution.user !== req.user._id) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to delete this solution'
       });
     }
 
-    await Solution.findByIdAndDelete(req.params.id);
+    delete mockSolutions[req.params.id];
 
     res.json({
       success: true,
@@ -301,16 +340,16 @@ const getMySolutions = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const solutions = await Solution.find({ user: req.user._id })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    const solutions = Object.values(mockSolutions)
+      .filter(s => s.user === req.user._id)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    const total = await Solution.countDocuments({ user: req.user._id });
+    const total = solutions.length;
+    const paginatedSolutions = solutions.slice(skip, skip + limit);
 
     res.json({
       success: true,
-      data: solutions,
+      data: paginatedSolutions,
       pagination: {
         page,
         limit,
@@ -334,5 +373,6 @@ module.exports = {
   updateSolution,
   deleteSolution,
   analyzeCode,
-  getMySolutions
-}; 
+  getMySolutions,
+  mockSolutions
+};

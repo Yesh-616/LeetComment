@@ -16,7 +16,8 @@ const router = express.Router();
 // Validation middleware
 const validateCreateComment = [
   body('solutionId')
-    .isMongoId()
+    .trim()
+    .notEmpty()
     .withMessage('Please provide a valid solution ID'),
   body('content')
     .trim()
@@ -24,7 +25,8 @@ const validateCreateComment = [
     .withMessage('Comment content must be between 1 and 2000 characters'),
   body('parentCommentId')
     .optional()
-    .isMongoId()
+    .trim()
+    .notEmpty()
     .withMessage('Please provide a valid parent comment ID')
 ];
 
